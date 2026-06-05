@@ -1,11 +1,8 @@
-import csv
 import os
-import smtplib
 import uuid
-from datetime import date, datetime
-from email.message import EmailMessage
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -15,59 +12,49 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, BooleanObject
 
 
-app = FastAPI(title="AD&D PDF Generator")
+app = FastAPI(title="Combined Signature Form PDF Generator")
 
-PDF_TEMPLATE = "AD&D_Fillable_Template.pdf"
+PDF_TEMPLATE = "COMBINED_SIGNATURE_FORM_-_Template.pdf"
 
-# Free Render setup:
-# Files are stored locally in generated_files.
-# They can disappear after Render redeploys/restarts.
-# For paid persistent storage later, set OUTPUT_DIR=/var/data/generated_files.
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "generated_files"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-class Employee(BaseModel):
-    first_name: Optional[str] = ""
-    last_name: Optional[str] = ""
-    email: Optional[str] = ""
-    phone: Optional[str] = ""
-    date_of_birth: Optional[str] = ""
-    salary: Optional[str] = ""
-
-
 class PacketRequest(BaseModel):
-    master_application_number: Optional[str] = ""
-    organization_name: Optional[str] = ""
-    type_of_business: Optional[str] = ""
-
-    mailing_address: Optional[str] = ""
-    city: Optional[str] = ""
-    state: Optional[str] = ""
-    zip: Optional[str] = ""
-
-    first_name: Optional[str] = ""
-    last_name: Optional[str] = ""
-    primary_contact: Optional[str] = ""
-
-    phone: Optional[str] = ""
+    contact_id: Optional[str] = ""
     email: Optional[str] = ""
-    form_date: Optional[str] = ""
 
-    agent_name: Optional[str] = ""
-    agent_code: Optional[str] = ""
-    agent_phone: Optional[str] = ""
-    agent_email: Optional[str] = ""
+    employer_name: Optional[str] = ""
+    address: Optional[str] = ""
+    policy_effective_date: Optional[str] = ""
+    policy_situs_state: Optional[str] = ""
 
-    carrier_email: Optional[str] = ""
+    worksite_term_life: Optional[str] = ""
+    group_accident: Optional[str] = ""
+    group_critical_illness: Optional[str] = ""
+    group_disability: Optional[str] = ""
+    lifetime_benefit_term: Optional[str] = ""
 
-    employees: List[Employee] = []
+    executed_day: Optional[str] = ""
+    executed_month: Optional[str] = ""
+    executed_year: Optional[str] = ""
+
+    signature_officer_page1: Optional[str] = ""
+    print_name_title_officer: Optional[str] = ""
+    authorized_agent_name: Optional[str] = ""
+
+    employer_organization_name: Optional[str] = ""
+    signature_officer_page2: Optional[str] = ""
+    officer_name_page2: Optional[str] = ""
+    officer_title_page2: Optional[str] = ""
+    date_page2: Optional[str] = ""
 
 
 @app.get("/")
 def home():
     return {
-        "status": "AD&D PDF Generator is running",
+        "status": "Combined Signature Form PDF Generator is running",
+        "template": PDF_TEMPLATE,
         "output_dir": str(OUTPUT_DIR),
     }
 
@@ -125,17 +112,10 @@ def download_file(filename: str):
             },
         )
 
-    if safe_name.lower().endswith(".pdf"):
-        media_type = "application/pdf"
-    elif safe_name.lower().endswith(".csv"):
-        media_type = "text/csv"
-    else:
-        media_type = "application/octet-stream"
-
     return FileResponse(
         path=str(file_path),
         filename=safe_name,
-        media_type=media_type,
+        media_type="application/pdf",
         headers={
             "Content-Disposition": f'attachment; filename="{safe_name}"',
             "Cache-Control": "no-store",
@@ -144,7 +124,7 @@ def download_file(filename: str):
 
 
 @app.post("/generate")
-def generate_packet(
+def generate_pdf(
     request: Request,
     payload: PacketRequest,
     x_api_key: Optional[str] = Header(default=None),
@@ -155,12 +135,9 @@ def generate_packet(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     unique_id = make_unique_id()
-
     completed_pdf = fill_pdf(payload, unique_id)
-    census_csv = generate_census_csv(payload, unique_id)
 
     pdf_filename = os.path.basename(completed_pdf)
-    csv_filename = os.path.basename(census_csv)
 
     public_base_url = os.getenv("PUBLIC_BASE_URL")
 
@@ -170,26 +147,16 @@ def generate_packet(
         base_url = str(request.base_url).rstrip("/")
 
     pdf_url = f"{base_url}/download/{quote(pdf_filename)}"
-    csv_url = f"{base_url}/download/{quote(csv_filename)}"
-
-    if payload.carrier_email:
-        send_email_with_attachments(
-            to_email=payload.carrier_email,
-            subject=f"AD&D Enrollment Packet - {payload.organization_name}",
-            body=f"Attached is the AD&D enrollment packet for {payload.organization_name}.",
-            attachments=[completed_pdf, census_csv],
-        )
 
     return {
         "status": "success",
-        "message": "AD&D packet generated",
+        "message": "Combined Signature Form PDF generated",
         "pdf_file": pdf_filename,
-        "csv_file": csv_filename,
         "pdf_url": pdf_url,
-        "csv_url": csv_url,
         "pdf_exists": os.path.exists(completed_pdf),
-        "csv_exists": os.path.exists(census_csv),
         "output_dir": str(OUTPUT_DIR),
+        "contact_id": payload.contact_id,
+        "email": payload.email,
     }
 
 
@@ -209,39 +176,38 @@ def fill_pdf(payload: PacketRequest, unique_id: str) -> str:
             NameObject("/NeedAppearances"): BooleanObject(True)
         })
 
-    actual_date = payload.form_date or date.today().strftime("%m/%d/%Y")
-
-    primary_contact = payload.primary_contact
-    if not primary_contact:
-        primary_contact = f"{payload.first_name} {payload.last_name}".strip()
-
     field_values = {
-        "master_application_number": payload.master_application_number,
-        "organization_name": payload.organization_name,
-        "type_of_business": payload.type_of_business,
-        "mailing_address": payload.mailing_address,
-        "city": payload.city,
-        "state": payload.state,
-        "zip": payload.zip,
-        "primary_contact": primary_contact,
-        "phone": payload.phone,
-        "email": payload.email,
-        "date": actual_date,
+        "employer_name": payload.employer_name,
+        "address": payload.address,
+        "policy_effective_date": payload.policy_effective_date,
+        "policy_situs_state": payload.policy_situs_state,
 
-        "agent_name": payload.agent_name,
-        "agent_code": payload.agent_code,
-        "agent_phone": payload.agent_phone,
-        "agent_email": payload.agent_email,
+        "worksite_term_life": checkbox_value(payload.worksite_term_life),
+        "group_accident": checkbox_value(payload.group_accident),
+        "group_critical_illness": checkbox_value(payload.group_critical_illness),
+        "group_disability": checkbox_value(payload.group_disability),
+        "lifetime_benefit_term": checkbox_value(payload.lifetime_benefit_term),
+
+        "executed_day": payload.executed_day,
+        "executed_month": payload.executed_month,
+        "executed_year": payload.executed_year,
+
+        "signature_officer_page1": payload.signature_officer_page1,
+        "print_name_title_officer": payload.print_name_title_officer,
+        "authorized_agent_name": payload.authorized_agent_name,
+
+        "employer_organization_name": payload.employer_organization_name,
+        "signature_officer_page2": payload.signature_officer_page2,
+        "officer_name_page2": payload.officer_name_page2,
+        "officer_title_page2": payload.officer_title_page2,
+        "date_page2": payload.date_page2,
     }
 
     for page in writer.pages:
         writer.update_page_form_field_values(page, field_values)
 
-    safe_org = clean_filename(payload.organization_name or "organization")
-
-    # Use ADD in the technical filename so Zapier/GHL URLs do not break.
-    # The form, email subject, and app title can still say AD&D.
-    output_path = OUTPUT_DIR / f"ADD_Master_Application_{safe_org}_{unique_id}.pdf"
+    safe_name = clean_filename(payload.employer_name or "combined_signature_form")
+    output_path = OUTPUT_DIR / f"Combined_Signature_Form_{safe_name}_{unique_id}.pdf"
 
     with open(output_path, "wb") as output_file:
         writer.write(output_file)
@@ -249,72 +215,16 @@ def fill_pdf(payload: PacketRequest, unique_id: str) -> str:
     return str(output_path)
 
 
-def generate_census_csv(payload: PacketRequest, unique_id: str) -> str:
-    safe_org = clean_filename(payload.organization_name or "organization")
+def checkbox_value(value: str) -> str:
+    if not value:
+        return ""
 
-    # Use ADD in the technical filename so Zapier/GHL URLs do not break.
-    output_path = OUTPUT_DIR / f"ADD_Census_{safe_org}_{unique_id}.csv"
+    normalized = str(value).strip().lower()
 
-    headers = [
-        "First Name",
-        "Last Name",
-        "Email",
-        "Phone",
-        "Date of Birth",
-        "Salary",
-    ]
+    if normalized in ["yes", "true", "checked", "1", "on", "selected"]:
+        return "Yes"
 
-    with open(output_path, "w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=headers)
-        writer.writeheader()
-
-        for employee in payload.employees:
-            writer.writerow({
-                "First Name": employee.first_name,
-                "Last Name": employee.last_name,
-                "Email": employee.email,
-                "Phone": employee.phone,
-                "Date of Birth": employee.date_of_birth,
-                "Salary": employee.salary,
-            })
-
-    return str(output_path)
-
-
-def send_email_with_attachments(to_email: str, subject: str, body: str, attachments: list):
-    smtp_host = os.getenv("SMTP_HOST")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user = os.getenv("SMTP_USER")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    from_email = os.getenv("FROM_EMAIL", smtp_user)
-
-    if not smtp_host or not smtp_user or not smtp_password:
-        raise HTTPException(
-            status_code=500,
-            detail="SMTP settings are missing in Render environment variables.",
-        )
-
-    message = EmailMessage()
-    message["From"] = from_email
-    message["To"] = to_email
-    message["Subject"] = subject
-    message.set_content(body)
-
-    for attachment in attachments:
-        file_path = Path(attachment)
-
-        with open(file_path, "rb") as file:
-            message.add_attachment(
-                file.read(),
-                maintype="application",
-                subtype="octet-stream",
-                filename=file_path.name,
-            )
-
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.starttls()
-        server.login(smtp_user, smtp_password)
-        server.send_message(message)
+    return ""
 
 
 def clean_filename(value: str) -> str:
@@ -329,7 +239,7 @@ def clean_filename(value: str) -> str:
     cleaned = "".join(allowed).strip("_")
 
     if not cleaned:
-        cleaned = "organization"
+        cleaned = "combined_signature_form"
 
     return cleaned[:80]
 
