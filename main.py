@@ -14,7 +14,7 @@ from pypdf.generic import NameObject, BooleanObject
 
 app = FastAPI(title="Combined Signature Form PDF Generator")
 
-PDF_TEMPLATE = "COMBINED_SIGNATURE_FORM_-_Template.pdf"
+PDF_TEMPLATE = "Combined_Signature_Form_Template.pdf"
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "generated_files"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -222,7 +222,7 @@ def checkbox_value(value: str) -> str:
     normalized = str(value).strip().lower()
 
     if normalized in ["yes", "true", "checked", "1", "on", "selected"]:
-        return "Yes"
+        return "/Yes"
 
     return ""
 
