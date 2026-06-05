@@ -1,3 +1,4 @@
+import io
 import os
 import uuid
 from datetime import datetime
@@ -9,7 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject, BooleanObject
+from reportlab.pdfgen import canvas
 
 
 app = FastAPI(title="Combined Signature Form PDF Generator")
@@ -57,17 +58,6 @@ def home():
         "template": PDF_TEMPLATE,
         "output_dir": str(OUTPUT_DIR),
     }
-
-
-@app.get("/fields")
-def inspect_pdf_fields():
-    reader = PdfReader(PDF_TEMPLATE)
-    fields = reader.get_fields()
-
-    if not fields:
-        return {"fields": [], "message": "No fillable fields found."}
-
-    return {"fields": list(fields.keys())}
 
 
 @app.get("/files")
@@ -161,50 +151,36 @@ def generate_pdf(
 
 
 def fill_pdf(payload: PacketRequest, unique_id: str) -> str:
-    reader = PdfReader(PDF_TEMPLATE)
+    template_path = Path(PDF_TEMPLATE)
+
+    if not template_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Template PDF not found: {PDF_TEMPLATE}",
+        )
+
+    reader = PdfReader(str(template_path))
     writer = PdfWriter()
 
-    for page in reader.pages:
+    page_count = len(reader.pages)
+
+    for page_index in range(page_count):
+        page = reader.pages[page_index]
+        page_width = float(page.mediabox.width)
+        page_height = float(page.mediabox.height)
+
+        overlay_pdf = create_overlay_for_page(
+            payload=payload,
+            page_index=page_index,
+            page_width=page_width,
+            page_height=page_height,
+        )
+
+        overlay_reader = PdfReader(overlay_pdf)
+        overlay_page = overlay_reader.pages[0]
+
+        page.merge_page(overlay_page)
         writer.add_page(page)
-
-    if "/AcroForm" in reader.trailer["/Root"]:
-        writer._root_object.update({
-            NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]
-        })
-
-        writer._root_object["/AcroForm"].update({
-            NameObject("/NeedAppearances"): BooleanObject(True)
-        })
-
-    field_values = {
-        "employer_name": payload.employer_name,
-        "address": payload.address,
-        "policy_effective_date": payload.policy_effective_date,
-        "policy_situs_state": payload.policy_situs_state,
-
-        "worksite_term_life": checkbox_value(payload.worksite_term_life),
-        "group_accident": checkbox_value(payload.group_accident),
-        "group_critical_illness": checkbox_value(payload.group_critical_illness),
-        "group_disability": checkbox_value(payload.group_disability),
-        "lifetime_benefit_term": checkbox_value(payload.lifetime_benefit_term),
-
-        "executed_day": payload.executed_day,
-        "executed_month": payload.executed_month,
-        "executed_year": payload.executed_year,
-
-        "signature_officer_page1": payload.signature_officer_page1,
-        "print_name_title_officer": payload.print_name_title_officer,
-        "authorized_agent_name": payload.authorized_agent_name,
-
-        "employer_organization_name": payload.employer_organization_name,
-        "signature_officer_page2": payload.signature_officer_page2,
-        "officer_name_page2": payload.officer_name_page2,
-        "officer_title_page2": payload.officer_title_page2,
-        "date_page2": payload.date_page2,
-    }
-
-    for page in writer.pages:
-        writer.update_page_form_field_values(page, field_values)
 
     safe_name = clean_filename(payload.employer_name or "combined_signature_form")
     output_path = OUTPUT_DIR / f"Combined_Signature_Form_{safe_name}_{unique_id}.pdf"
@@ -215,16 +191,112 @@ def fill_pdf(payload: PacketRequest, unique_id: str) -> str:
     return str(output_path)
 
 
-def checkbox_value(value: str) -> str:
-    if not value:
-        return ""
+def create_overlay_for_page(
+    payload: PacketRequest,
+    page_index: int,
+    page_width: float,
+    page_height: float,
+) -> io.BytesIO:
+    packet = io.BytesIO()
+    c = canvas.Canvas(packet, pagesize=(page_width, page_height))
+
+    c.setFillColorRGB(0, 0, 0)
+
+    if page_index == 0:
+        draw_page_1(c, payload)
+
+    if page_index == 1:
+        draw_page_2(c, payload)
+
+    c.save()
+    packet.seek(0)
+
+    return packet
+
+
+def draw_page_1(c: canvas.Canvas, payload: PacketRequest):
+    # Top fields
+    draw_text(c, payload.employer_name, x=125, y=661, size=9, max_width=390)
+    draw_text(c, payload.address, x=83, y=646, size=9, max_width=440)
+    draw_text(c, payload.policy_effective_date, x=137, y=631, size=9, max_width=385)
+    draw_text(c, payload.policy_situs_state, x=125, y=616, size=9, max_width=395)
+
+    # Checkboxes
+    draw_check(c, payload.worksite_term_life, x=40, y=588)
+    draw_check(c, payload.group_accident, x=40, y=561)
+    draw_check(c, payload.group_critical_illness, x=40, y=543)
+    draw_check(c, payload.group_disability, x=40, y=525)
+    draw_check(c, payload.lifetime_benefit_term, x=40, y=506)
+
+    # Executed date
+    draw_text(c, payload.executed_day, x=96, y=230, size=9, max_width=65)
+    draw_text(c, payload.executed_month, x=198, y=230, size=9, max_width=65)
+    draw_text(c, payload.executed_year, x=285, y=230, size=9, max_width=60)
+
+    # Signature and officer fields
+    draw_text(c, payload.signature_officer_page1, x=38, y=194, size=9, max_width=245)
+    draw_text(c, payload.print_name_title_officer, x=322, y=194, size=9, max_width=245)
+    draw_text(c, payload.authorized_agent_name, x=322, y=147, size=9, max_width=245)
+
+
+def draw_page_2(c: canvas.Canvas, payload: PacketRequest):
+    employer_org = payload.employer_organization_name or payload.employer_name
+    signature_2 = payload.signature_officer_page2 or payload.signature_officer_page1
+
+    draw_text(c, employer_org, x=38, y=618, size=9, max_width=245)
+
+    draw_text(c, signature_2, x=38, y=368, size=9, max_width=245)
+    draw_text(c, payload.officer_name_page2, x=327, y=368, size=9, max_width=245)
+    draw_text(c, payload.officer_title_page2, x=38, y=302, size=9, max_width=245)
+    draw_text(c, payload.date_page2, x=38, y=234, size=9, max_width=245)
+
+
+def draw_text(
+    c: canvas.Canvas,
+    value: Optional[str],
+    x: float,
+    y: float,
+    size: int = 9,
+    max_width: float = 250,
+):
+    text = str(value or "").strip()
+
+    if not text:
+        return
+
+    c.setFont("Helvetica", size)
+
+    while c.stringWidth(text, "Helvetica", size) > max_width and len(text) > 3:
+        text = text[:-1]
+
+    c.drawString(x, y, text)
+
+
+def draw_check(c: canvas.Canvas, value: Optional[str], x: float, y: float):
+    if not is_checked(value):
+        return
+
+    c.setFont("Helvetica-Bold", 12)
+
+    # Draw a simple check mark centered in the checkbox.
+    c.drawString(x - 4, y - 5, "✓")
+
+
+def is_checked(value: Optional[str]) -> bool:
+    if value is None:
+        return False
 
     normalized = str(value).strip().lower()
 
-    if normalized in ["yes", "true", "checked", "1", "on", "selected"]:
-        return "/Yes"
-
-    return ""
+    return normalized in [
+        "yes",
+        "true",
+        "checked",
+        "1",
+        "on",
+        "selected",
+        "y",
+    ]
 
 
 def clean_filename(value: str) -> str:
